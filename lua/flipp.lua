@@ -9,23 +9,26 @@ local M = {}
 ---@field extensions flipp.Extensions
 
 
+---@type flipp.Opts
+local options = {
+  extensions = {
+    filetype = "{c,cpp}",
+    header = { "h", "hpp" },
+    source = { "c", "cpp" },
+  }
+}
+
 ---@param opts flipp.Opts|nil: opts
 M.setup = function(opts)
-  --FIXME: Need to do this level-by-level?
-  ---@type flipp.Opts
-  local o = vim.tbl_extend("keep", opts, {
-    extensions = {
-      filetype = { "{c,cpp}" },
-      header = { "h", "hpp" },
-      source = { "c", "cpp" },
-    }
-  })
+  --HACK: This should more fully extend extensions
+  opts = opts or options
+  opts.extensions = opts.extensions or options.extensions
 
   vim.api.nvim_create_autocmd({ "FileType", "BufReadPost" }, {
-    pattern = o.extensions.filetype,
+    pattern = opts.extensions.filetype,
     callback = function()
       vim.api.nvim_buf_create_user_command(0, 'Flipp', function(_)
-          M.swap(o.extensions)
+          M.swap(opts.extensions)
         end,
         { nargs = 0 })
     end
