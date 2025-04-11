@@ -11,14 +11,15 @@ local M = {}
 
 ---@param opts flipp.Opts|nil: opts
 M.setup = function(opts)
+  --FIXME: Need to do this level-by-level?
   ---@type flipp.Opts
-  local o = opts or {
+  local o = vim.tbl_extend("keep", opts, {
     extensions = {
       filetype = { "{c,cpp}" },
       header = { "h", "hpp" },
       source = { "c", "cpp" },
     }
-  }
+  })
 
   vim.api.nvim_create_autocmd({ "FileType", "BufReadPost" }, {
     pattern = o.extensions.filetype,
