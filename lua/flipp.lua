@@ -26,11 +26,15 @@ M.setup = function(opts)
 
   vim.api.nvim_create_autocmd({ "FileType", "BufReadPost" }, {
     pattern = opts.extensions.filetype,
-    callback = function()
+    callback = function(ev)
       vim.api.nvim_buf_create_user_command(0, 'Flipp', function(_)
           M.swap(opts.extensions)
         end,
         { nargs = 0 })
+
+      -- FIXME: Allow for dynamic keymaps
+      vim.keymap.set("n", "<leader>go", function() M.swap(opts.extensions) end,
+        { buffer = ev.buf, desc = "go to source/header file" })
     end
   })
 end
