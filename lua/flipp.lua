@@ -7,8 +7,10 @@
 ---@field end flipp.Position
 
 ---Get the cursor selection in the current window
+---Positions are 0 indexed
 ---@return flipp.Range
 local function get_selection_range()
+  -- FIXME: Does not calculate start and end correctly for line and block visual modes
   local pos_end = vim.fn.getpos('.')   -- cursor position
   local pos_start = vim.fn.getpos('v') -- defaults to '.' when not in visual mode
 
