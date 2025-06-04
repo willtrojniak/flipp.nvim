@@ -1,3 +1,29 @@
+---@class flipp.Position
+---@field line integer
+---@field character integer
+
+---@class flipp.Range
+---@field start flipp.Position
+---@field end flipp.Position
+
+---Get the cursor selection in the current window
+---@return flipp.Range
+local function get_selection_range()
+  local pos_end = vim.fn.getpos('.')   -- cursor position
+  local pos_start = vim.fn.getpos('v') -- defaults to '.' when not in visual mode
+
+  local start_row = math.min(pos_start[2], pos_end[2]) - 1
+  local end_row = math.max(pos_start[2], pos_end[2]) - 1
+  local start_col = math.min(pos_start[3], pos_end[3]) - 1
+  local end_col = math.max(pos_start[3], pos_end[3]) - 1
+
+  ---@type flipp.Range
+  return {
+    ["start"] = { line = start_row, character = start_col },
+    ["end"] = { line = end_row, character = end_col }
+  }
+end
+
 local M = {}
 
 ---@class flipp.Opts
@@ -102,9 +128,11 @@ M.get_fully_qualified_symbol = function(callback)
       return
     end
 
-    local cursor_pos = vim.api.nvim_win_get_cursor(0)
-    local cursor_line = cursor_pos[1] - 1
-    local cursor_col = cursor_pos[2]
+    print(vim.inspect(result))
+    local cursor_range = get_selection_range()
+    local cursor_line = cursor_range.start.line
+    local cursor_col = cursor_range.start.character
+    print(cursor_line .. ", " .. cursor_col)
 
     local function is_inside(range)
       local start = range.start
@@ -124,7 +152,6 @@ M.get_fully_qualified_symbol = function(callback)
     local function find_symbol_path(symbols, path)
       for _, sym in ipairs(symbols) do
         if is_inside(sym.range) then
-          print(sym.text)
           local new_path = vim.deepcopy(path)
           table.insert(new_path, { name = sym.name, detail = sym.detail, kind = sym.kind })
           if sym.children then
@@ -205,7 +232,11 @@ end
 
 vim.keymap.set("n", "<leader>x", M.has_definition)
 vim.keymap.set("n", "<leader>h", M.get_definition_symbol)
+vim.keymap.set({ "n", "v" }, "<leader>t", function()
+  print(vim.inspect(get_selection_range()))
+end)
 
 M.setup()
+
 
 return M
