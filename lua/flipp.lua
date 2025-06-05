@@ -1,46 +1,24 @@
----@class flipp.Position
----@field line integer
----@field character integer
+-- TODO: Avoid generating definitions that are already implemented
+-- TODO: Get parameter names with their types
+-- TODO: Automatically paste definitions into the source file
+-- TODO: Automatically paste namespaces
+-- TODO: Automatically detect matching namespaces in source file
 
----@class flipp.Range
----@field start flipp.Position
----@field end flipp.Position
+---@class flipp.lsp.clangd.Symbol
+---@field name string
+---@field kind integer
+---@field detail? string
+---@field range flipp.Range
+---@field selectionRange flipp.Range
+---@field children? flipp.lsp.clangd.Symbol[]
 
----Get the cursor selection in the current window
----Positions are 0 indexed
----@return flipp.Range
-local function get_selection_range()
-  -- FIXME: Does not calculate start and end correctly for line and block visual modes
-  local pos_end = vim.fn.getpos('.')   -- cursor position
-  local pos_start = vim.fn.getpos('v') -- defaults to '.' when not in visual mode
+---@class flipp.Symbol
+---@field name string
+---@field kind integer
+---@field detail? string
+---@field children? flipp.Symbol[]
 
-  local start_row = math.min(pos_start[2], pos_end[2]) - 1
-  local end_row = math.max(pos_start[2], pos_end[2]) - 1
-  local start_col = math.min(pos_start[3], pos_end[3]) - 1
-  local end_col = math.max(pos_start[3], pos_end[3]) - 1
-
-  ---@type flipp.Range
-  return {
-    ["start"] = { line = start_row, character = start_col },
-    ["end"] = { line = end_row, character = end_col }
-  }
-end
-
-local M = {}
-
----@class flipp.Opts
----@field extensions {[string]:string[]}
-
----@type flipp.Opts
-local options = {
-  extensions = {
-    h = { "c", "cpp" },
-    hpp = { "c", "cpp" },
-    c = { "h", "hpp" },
-    cpp = { "h", "hpp" },
-  }
-}
-
+---@type table<string, integer>
 local symbol_kinds = {
   File = 1,
   Module = 2,
@@ -70,23 +48,170 @@ local symbol_kinds = {
   TypeParameter = 26
 }
 
+--- @class flipp.Definition
+--- @field name string|nil
+--- @field returnType string|nil
+--- @field parameters string
+--- @field namespaces string[]
+--- @field classes string[]
+
+---@class flipp.Position
+---@field line integer
+---@field character integer
+
+---@class flipp.Range
+---@field start flipp.Position
+---@field end flipp.Position
+---@field block? boolean -- defaults to false
+
+---Get the cursor selection in the current window
+---Positions are 0 indexed
+---@return flipp.Range
+local function get_cursor_range()
+  local pos_start = vim.fn.getpos(".") -- cursor position
+  local pos_end = vim.fn.getpos("v")   -- defaults to '.' when not in visual mode
+
+  -- Normalize to 0-indexed to match clangd
+  local start_row = math.min(pos_start[2], pos_end[2]) - 1
+  local end_row = math.max(pos_start[2], pos_end[2]) - 1
+  local start_col = math.min(pos_start[3], pos_end[3]) - 1
+  local end_col = math.max(pos_start[3], pos_end[3]) - 1
+
+  -- Correct the range based on the current mode
+  local mode = vim.fn.mode()
+  local block = mode == "\22"
+  if mode == "V" then
+    start_col = 0
+    end_col = vim.v.maxcol
+  end
+
+  ---@type flipp.Range
+  return {
+    ["start"] = { line = start_row, character = start_col },
+    ["end"] = { line = end_row, character = end_col },
+    ["block"] = block
+  }
+end
+
+---@param r1 flipp.Range
+---@param r2 flipp.Range
+---@return boolean
+local function is_range_intersect(r1, r2)
+  -- FIXME: Handle block intersections properly
+  if r1["end"].line < r2["start"].line then return false end
+  if r1["end"].line == r2["start"].line and r1["end"].character < r2["start"].character then return false end
+  if r1["start"].line > r2["end"].line then return false end
+  if r1["start"].line == r2["end"].line and r1["start"].character > r2["end"].character then return false end
+  return true
+end
+
+---@param range flipp.Range
+---@param symbols flipp.lsp.clangd.Symbol[]
+---@return flipp.Symbol[]
+local function find_symbols_in_range(range, symbols)
+  local t = {}
+  for _, sym in ipairs(symbols) do
+    if is_range_intersect(sym.range, range) then
+      local s = { name = sym.name, detail = sym.detail, kind = sym.kind }
+      if sym.children then
+        s.children = find_symbols_in_range(range, sym.children)
+      end
+      table.insert(t, s)
+    end
+  end
+  return t
+end
+
+---@param symbols flipp.Symbol[]
+---@return flipp.Definition[]
+local function build_symbols_fully_qualified_definitions(symbols)
+  ---@param symbol flipp.Symbol
+  ---@param def flipp.Definition
+  ---@return flipp.Definition[]
+  local function helper(symbol, def)
+    if symbol.kind == symbol_kinds.Namespace then
+      table.insert(def.namespaces, symbol.name)
+    elseif symbol.kind == symbol_kinds.Class then
+      table.insert(def.classes, symbol.name)
+    elseif symbol.kind == symbol_kinds.Function or symbol.kind == symbol_kinds.Constructor or symbol.kind == symbol_kinds.Method then
+      local ret, params
+      if not symbol.detail then
+        ret, params = "", "()" -- Handles destructors
+      else
+        -- FIXME: Does not include paramter names
+        ret, params = symbol.detail:match("^(.-)%s*(%b())$")
+      end
+      def.returnType = ret
+      def.parameters = params
+      def.name = symbol.name
+    end
+
+    if not symbol.children or vim.tbl_isempty(symbol.children) then return { def } end
+
+    ---@type flipp.Definition[]
+    local defs = {}
+    for _, child in ipairs(symbol.children) do
+      for _, res in ipairs(helper(child, vim.deepcopy(def))) do
+        if res.name and res.name ~= "" then
+          table.insert(defs, res)
+        end
+      end
+    end
+    return defs
+  end
+
+  for _, sym in ipairs(symbols) do
+    --- @type flipp.Definition
+    local def = {
+      name = nil,
+      returnType = nil,
+      parameters = "()",
+      namespaces = {},
+      classes = {},
+    }
+    return helper(sym, def)
+  end
+  return {}
+end
+
+---@param def flipp.Definition
+---@param includeNamespaces? boolean defaults to false
+---@return string
+local def_to_string = function(def, includeNamespaces)
+  if not def.name then return "" end
+  if includeNamespaces == nil then
+    includeNamespaces = false
+  end
+  local str = ""
+  if def.returnType and def.returnType ~= "" then
+    str = str .. def.returnType .. " "
+  end
+  if includeNamespaces then
+    str = str .. table.concat(def.namespaces, "::")
+    if #def.namespaces > 0 then str = str .. "::" end
+  end
+  str = str .. table.concat(def.classes, "::")
+  if #def.classes > 0 then str = str .. "::" end
+  str = str .. def.name .. def.parameters .. " {}"
+  return str
+end
+
+local M = {}
+
+---@class flipp.Opts
+
+---@type flipp.Opts
+local default_opts = {}
+
+
 ---@param opts flipp.Opts|nil: opts
 M.setup = function(opts)
-  opts = opts or options
-  opts.extensions = opts.extensions or options.extensions
+  opts = opts or default_opts
 
-  vim.api.nvim_create_autocmd({ "BufNewFile", "BufReadPost" }, {
-    callback = function(ev)
-      local ext = vim.fn.expand("%:e")
-      local targets = opts.extensions[ext]
-      if not targets then return end
-
-      vim.api.nvim_buf_create_user_command(0, 'Flipp', function(_)
-          M.swap(targets)
-        end,
-        { nargs = 0 })
-    end
-  })
+  vim.api.nvim_create_user_command('FlippGenerate', function()
+      M.get_definition_symbols()
+    end,
+    { nargs = 0, range = true })
 end
 
 M.has_definition = function()
@@ -113,7 +238,9 @@ M.has_definition = function()
   end, 0)
 end
 
-M.get_fully_qualified_symbol = function(callback)
+---@param range flipp.Range
+---@param callback fun(symbols: flipp.Symbol[])
+M.get_fully_qualified_selected_symbols = function(range, callback)
   local clients = vim.lsp.get_clients({ bufnr = 0, name = "clangd" })
   if vim.tbl_isempty(clients) then
     vim.notify("clangd is not running", vim.log.levels.ERROR)
@@ -131,114 +258,30 @@ M.get_fully_qualified_symbol = function(callback)
     end
 
     print(vim.inspect(result))
-    local cursor_range = get_selection_range()
-    local cursor_line = cursor_range.start.line
-    local cursor_col = cursor_range.start.character
-    print(cursor_line .. ", " .. cursor_col)
+    local selected_symbols = find_symbols_in_range(range, result)
 
-    local function is_inside(range)
-      local start = range.start
-      local end_ = range["end"]
-      if cursor_line < start.line or cursor_line > end_.line then
-        return false
-      end
-      if cursor_line == start.line and cursor_col < start.character then
-        return false
-      end
-      if cursor_line == end_.line and cursor_col > end_.character then
-        return false
-      end
-      return true
-    end
-
-    local function find_symbol_path(symbols, path)
-      for _, sym in ipairs(symbols) do
-        if is_inside(sym.range) then
-          local new_path = vim.deepcopy(path)
-          table.insert(new_path, { name = sym.name, detail = sym.detail, kind = sym.kind })
-          if sym.children then
-            local deeper = find_symbol_path(sym.children, new_path)
-            if deeper then return deeper end
-          end
-          return new_path
-        end
-      end
-      return nil
-    end
-
-    local symbol_path = find_symbol_path(result, {})
-    callback(symbol_path)
+    callback(selected_symbols)
   end, 0)
 end
 
---- @class flipp.Definition
---- @field name string|nil
---- @field returnType string|nil
---- @field parameters string
---- @field namespaces string[]
---- @field classes string[]
 
-M.get_definition_symbol = function()
-  M.get_fully_qualified_symbol(function(symbol_path)
-    if not symbol_path then
-      vim.notify("No symbol hovered", vim.log.levels.INFO)
+M.get_definition_symbols = function()
+  local cursor_range = get_cursor_range()
+  M.get_fully_qualified_selected_symbols(cursor_range, function(selected_symbols)
+    -- FIXME: Includes definitions of those already implemented
+    local defs = build_symbols_fully_qualified_definitions(selected_symbols)
+    if vim.tbl_isempty(defs) then
+      vim.notify("No declaration hovered", vim.log.levels.INFO)
       return
     end
 
-    --- @type flipp.Definition
-    local def = {
-      name = nil,
-      returnType = nil,
-      parameters = "()",
-      namespaces = {},
-      classes = {},
-    }
-
-    for _, sym in ipairs(symbol_path) do
-      if sym.kind == symbol_kinds.Namespace then
-        table.insert(def.namespaces, sym.name)
-      elseif sym.kind == symbol_kinds.Class then
-        table.insert(def.classes, sym.name)
-      elseif sym.kind == symbol_kinds.Function or sym.kind == symbol_kinds.Constructor or sym.kind == symbol_kinds.Method then
-        local ret, params = sym.detail:match("^(.-)%s*(%b())$")
-        def.returnType = ret
-        def.parameters = params
-
-        def.name = sym.name
-      end
-    end
-
-    ---@param def flipp.Definition
-    local def_to_string = function(def)
-      local str = ""
-      if def.returnType then
-        str = str .. def.returnType .. " "
-      end
-      str = str .. table.concat(def.namespaces, "::")
-      if #def.namespaces > 0 then str = str .. "::" end
-      str = str .. table.concat(def.classes, "::")
-      if #def.classes > 0 then str = str .. "::" end
-      str = str .. def.name .. def.parameters .. " {}"
-      return str
-    end
-
-    if not def.name then return end
-
-
-    print(def_to_string(def))
-    local row = vim.api.nvim_win_get_cursor(0)[1]
-    local str = def_to_string(def)
-    vim.api.nvim_buf_set_lines(0, row, row, false, { str })
+    local def_strings = vim.tbl_map(def_to_string, defs)
+    -- HACK: Preferably, would paste the strings into the source file
+    vim.fn.setreg('d', def_strings, "l")
+    vim.notify("Copied " .. #def_strings .. " definitions to 'd' register", vim.log.levels.INFO)
   end)
 end
 
-vim.keymap.set("n", "<leader>x", M.has_definition)
-vim.keymap.set("n", "<leader>h", M.get_definition_symbol)
-vim.keymap.set({ "n", "v" }, "<leader>t", function()
-  print(vim.inspect(get_selection_range()))
-end)
-
-M.setup()
-
+vim.keymap.set({ "n", "v" }, "<leader>gd", M.get_definition_symbols, { desc = "Generate Definitions" })
 
 return M
