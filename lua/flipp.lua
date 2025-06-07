@@ -1,8 +1,7 @@
--- TODO: Avoid generating definitions that are already implemented
--- TODO: Get parameter names with their types
 -- TODO: Automatically paste definitions into the source file
 -- TODO: Automatically paste namespaces
 -- TODO: Automatically detect matching namespaces in source file
+-- TODO: Automatically open source file in another window
 
 ---@class flipp.lsp.clangd.Symbol
 ---@field name string
@@ -11,6 +10,10 @@
 ---@field range flipp.Range
 ---@field selectionRange flipp.Range
 ---@field children? flipp.lsp.clangd.Symbol[]
+
+---@class flipp.lsp.clangd.DefinitionResult
+---@field range flipp.Range
+---@field uri string
 
 ---@class flipp.Symbol
 ---@field name string
@@ -252,39 +255,50 @@ M.setup = function(opts)
   opts = opts or default_opts
 
   vim.api.nvim_create_user_command('FlippGenerate', function()
-      M.get_definition_symbols()
+      M.get_fully_qualified_undefined_selected_declarations()
     end,
     { nargs = 0, range = true })
 end
 
-M.has_definition = function()
-  --- FIXME: Compare definition use TS to determine if definition/vs declaration
-  --- and use clangd to find location of definition
+---@param node TSNode
+---@return boolean
+local function has_definition(node)
   local client = vim.lsp.get_clients({ bufnr = 0, name = "clangd" })[1]
   if vim.tbl_isempty(client) then
-    vim.notify("Clangd is not running", vim.log.levels.ERROR)
-    return
+    vim.notify("Clangd is not running - cannot determine existing definitions", vim.log.levels.WARN)
+    return false
   end
 
+  local node_range = get_node_range(node)
   local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+  params.position = {
+    line = node_range.start.line, character = node_range.start.character
+  }
 
-  client:request("textDocument/definition", params, function(err, result)
-    if err then
-      vim.notify("LSP error: " .. err.message, vim.log.levels.ERROR)
-      return
-    end
+  --- PERF: Can this be made async again - or perhaps make outer funcs async
+  local resp = client:request_sync("textDocument/definition", params)
+  if not resp then
+    vim.notify("LSP timed out", vim.log.levels.WARN)
+    return false
+  end
 
-    if result and not vim.tbl_isempty(result) then
-      print("Definition already exists.", vim.inspect(result))
-      return
-    end
+  local result, err = resp.result, resp.err
+  if err then
+    vim.notify("LSP error: " .. err.message, vim.log.levels.ERROR)
+    return false
+  end
 
-    print("Need to generate implementations")
-  end, 0)
+  if not result or vim.tbl_isempty(result) then return false end
+
+  for _, data in ipairs(result) do
+    if not is_range_intersect(node_range, data.range) then return true end
+  end
+
+  return false
 end
 
 
-M.get_fully_qualified_selected_symbols_ts = function()
+function M.get_fully_qualified_undefined_selected_declarations()
   local cursor_range = get_cursor_range()
   local decl_nodes = get_declaration_nodes()
 
@@ -292,7 +306,8 @@ M.get_fully_qualified_selected_symbols_ts = function()
   local defs = {}
   for _, decl_node in ipairs(decl_nodes) do
     local node_range = get_node_range(decl_node)
-    if is_range_intersect(cursor_range, node_range) then
+    local func_node = find_decl_func_node(decl_node)
+    if func_node and is_range_intersect(cursor_range, node_range) and not has_definition(func_node) then
       local def = build_definition_from_declaration(decl_node)
       if def then
         table.insert(defs, def)
@@ -308,7 +323,5 @@ M.get_fully_qualified_selected_symbols_ts = function()
     vim.notify("Copied " .. #defs .. " definition to 'd' register", vim.log.levels.INFO)
   end
 end
-
-vim.keymap.set({ "n", "v" }, "<leader>gd", M.get_fully_qualified_selected_symbols_ts, { desc = "Generate Definitions" })
 
 return M
