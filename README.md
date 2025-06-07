@@ -1,4 +1,4 @@
-**flipp.nvim** provides C++ function and method definition generation from declarations
+**flipp.nvim** provides smart C++ function and method definition generation from declarations
 
 [Features](#✨-features ) • [Requirements](#📋-requirements) • [Installation](#🔧-installation)
 
