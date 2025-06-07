@@ -18,42 +18,11 @@
 ---@field detail? string
 ---@field children? flipp.Symbol[]
 
----@type table<string, integer>
-local symbol_kinds = {
-  File = 1,
-  Module = 2,
-  Namespace = 3,
-  Package = 4,
-  Class = 5,
-  Method = 6,
-  Property = 7,
-  Field = 8,
-  Constructor = 9,
-  Enum = 10,
-  Interface = 11,
-  Function = 12,
-  Variable = 13,
-  Constant = 14,
-  String = 15,
-  Number = 16,
-  Boolean = 17,
-  Array = 18,
-  Object = 19,
-  Key = 20,
-  Null = 21,
-  EnumMember = 22,
-  Struct = 23,
-  Event = 24,
-  Operator = 25,
-  TypeParameter = 26
-}
-
 --- @class flipp.Definition
---- @field name string|nil
---- @field returnType string|nil
---- @field parameters string
---- @field namespaces string[]
---- @field classes string[]
+--- @field decl_func TSNode
+--- @field classifiers TSNode[]
+--- @field namespaces TSNode[]
+--- @field classes TSNode[]
 
 ---@class flipp.Position
 ---@field line integer
@@ -93,6 +62,18 @@ local function get_cursor_range()
   }
 end
 
+---@param node TSNode
+---@return flipp.Range
+local function get_node_range(node)
+  local range_int = vim.treesitter.get_range(node, 0)
+
+  ---@type flipp.Range
+  return {
+    ["start"] = { line = range_int[1], character = range_int[2] },
+    ["end"] = { line = range_int[4], character = range_int[5] }
+  }
+end
+
 ---@param r1 flipp.Range
 ---@param r2 flipp.Range
 ---@return boolean
@@ -105,95 +86,158 @@ local function is_range_intersect(r1, r2)
   return true
 end
 
----@param range flipp.Range
----@param symbols flipp.lsp.clangd.Symbol[]
----@return flipp.Symbol[]
-local function find_symbols_in_range(range, symbols)
-  local t = {}
-  for _, sym in ipairs(symbols) do
-    if is_range_intersect(sym.range, range) then
-      local s = { name = sym.name, detail = sym.detail, kind = sym.kind }
-      if sym.children then
-        s.children = find_symbols_in_range(range, sym.children)
-      end
-      table.insert(t, s)
-    end
+---@param decl_node TSNode
+---@return TSNode|nil node TSNode of type function_declarator if not nil
+local function find_decl_func_node(decl_node)
+  if not decl_node then return nil end
+  if decl_node:type() == "function_declarator" then
+    return decl_node
   end
-  return t
+
+  for child in decl_node:iter_children() do
+    local found = find_decl_func_node(child)
+    if found then return found end
+  end
+  return nil
 end
 
----@param symbols flipp.Symbol[]
----@return flipp.Definition[]
-local function build_symbols_fully_qualified_definitions(symbols)
-  ---@param symbol flipp.Symbol
-  ---@param def flipp.Definition
-  ---@return flipp.Definition[]
-  local function helper(symbol, def)
-    if symbol.kind == symbol_kinds.Namespace then
-      table.insert(def.namespaces, symbol.name)
-    elseif symbol.kind == symbol_kinds.Class then
-      table.insert(def.classes, symbol.name)
-    elseif symbol.kind == symbol_kinds.Function or symbol.kind == symbol_kinds.Constructor or symbol.kind == symbol_kinds.Method then
-      local ret, params
-      if not symbol.detail then
-        ret, params = "", "()" -- Handles destructors
-      else
-        -- FIXME: Does not include paramter names
-        ret, params = symbol.detail:match("^(.-)%s*(%b())$")
-      end
-      def.returnType = ret
-      def.parameters = params
-      def.name = symbol.name
-    end
+---@param node TSNode
+---@return boolean callable true if node has a function_declarator as eventual child
+local function is_callable_declaration(node)
+  return find_decl_func_node(node) ~= nil
+end
 
-    if not symbol.children or vim.tbl_isempty(symbol.children) then return { def } end
-
-    ---@type flipp.Definition[]
-    local defs = {}
-    for _, child in ipairs(symbol.children) do
-      for _, res in ipairs(helper(child, vim.deepcopy(def))) do
-        if res.name and res.name ~= "" then
-          table.insert(defs, res)
-        end
-      end
-    end
-    return defs
+---@return TSNode[]
+local function get_declaration_nodes()
+  local ts = vim.treesitter
+  local parser = ts.get_parser(0, nil, { error = false })
+  if not parser then
+    vim.notify("Failed to create treesitter parser", vim.log.levels.ERROR)
+    return {}
   end
 
-  for _, sym in ipairs(symbols) do
-    --- @type flipp.Definition
-    local def = {
-      name = nil,
-      returnType = nil,
-      parameters = "()",
-      namespaces = {},
-      classes = {},
-    }
-    return helper(sym, def)
+  local query = ts.query.parse("cpp", [[
+(declaration
+  declarator: [(function_declarator) (reference_declarator) (pointer_declarator)]
+  ) @decl
+
+(field_declaration
+  declarator: [(function_declarator) (reference_declarator) (pointer_declarator)]
+  !default_value
+  ) @decl
+]])
+
+
+  local tree = parser:parse()
+  if not tree then
+    vim.notify("Failed to parse tree", vim.log.levels.WARN)
+    return {}
   end
-  return {}
+
+  local root = tree[1]:root()
+  local nodes = {}
+  for _, node in query:iter_captures(root, 0) do
+    if is_callable_declaration(node) then
+      table.insert(nodes, node)
+    end
+  end
+  return nodes
+end
+
+---@param decl TSNode
+---@return flipp.Definition|nil
+local function build_definition_from_declaration(decl)
+  local decl_func_node = find_decl_func_node(decl)
+  if not decl_func_node then return nil end
+
+  ---@type flipp.Definition
+  local def = {
+    decl_func = decl_func_node,
+    classifiers = {},
+    namespaces = {},
+    classes = {},
+  }
+
+  ---@type TSNode|nil
+  local n = decl_func_node
+  local outer = false
+  while n ~= nil do
+    if n:type() == "declaration" or n:type() == "field_declaration" then
+      outer = true
+    elseif n:type() == "namespace_definition" then
+      local name_node = n:named_child(0) --[[@as TSNode]]
+      table.insert(def.namespaces, 1, name_node)
+    elseif n:type() == "class_specifier" then
+      local name_node = n:named_child(0) --[[@as TSNode]]
+      table.insert(def.classes, 1, name_node)
+    end
+
+    while not outer and n:prev_sibling() ~= nil do
+      n = n:prev_sibling() --[[@as TSNode]]
+      table.insert(def.classifiers, 1, n)
+    end
+    n = n:parent()
+  end
+
+  return def
+end
+
+---@param node TSNode
+---@return string
+local function decl_func_node_to_str(node)
+  if node:type() ~= "function_declarator" then return "" end
+
+  local ts = vim.treesitter
+  local outStr = ts.get_node_text(node, 0):gsub("%s+final", ""):gsub("%s+override", "")
+  return outStr .. " {}"
+end
+
+---@param nodes TSNode[]
+---@return string
+local function namespace_nodes_to_str(nodes)
+  if #nodes == 0 then return "" end
+
+  local ts = vim.treesitter
+  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, 0) end, nodes)
+  return table.concat(strs, "::") .. "::"
+end
+
+---@param nodes TSNode[]
+---@return string
+local function class_nodes_to_str(nodes)
+  if #nodes == 0 then return "" end
+
+  local ts = vim.treesitter
+  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, 0) end, nodes)
+  return table.concat(strs, "::") .. "::"
+end
+
+---@param nodes TSNode[]
+---@return string
+local function classifier_nodes_to_str(nodes)
+  local ts = vim.treesitter
+  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, 0) end, nodes)
+  local s = ""
+  for _, w in ipairs(strs) do
+    if w == "virtual" or w == "static" then
+    elseif w == "*" or w == "&" then
+      s = s .. w
+    else
+      s = s .. w .. " "
+    end
+  end
+  return s
 end
 
 ---@param def flipp.Definition
----@param includeNamespaces? boolean defaults to false
 ---@return string
-local def_to_string = function(def, includeNamespaces)
-  if not def.name then return "" end
-  if includeNamespaces == nil then
-    includeNamespaces = false
-  end
-  local str = ""
-  if def.returnType and def.returnType ~= "" then
-    str = str .. def.returnType .. " "
-  end
-  if includeNamespaces then
-    str = str .. table.concat(def.namespaces, "::")
-    if #def.namespaces > 0 then str = str .. "::" end
-  end
-  str = str .. table.concat(def.classes, "::")
-  if #def.classes > 0 then str = str .. "::" end
-  str = str .. def.name .. def.parameters .. " {}"
-  return str
+local function def_to_string(def)
+  local func_str = decl_func_node_to_str(def.decl_func)
+  local namespace_str = namespace_nodes_to_str(def.namespaces)
+  local class_str = class_nodes_to_str(def.classes)
+  local classifier_str = classifier_nodes_to_str(def.classifiers)
+
+  return classifier_str .. namespace_str .. class_str .. func_str
 end
 
 local M = {}
@@ -202,7 +246,6 @@ local M = {}
 
 ---@type flipp.Opts
 local default_opts = {}
-
 
 ---@param opts flipp.Opts|nil: opts
 M.setup = function(opts)
@@ -215,6 +258,8 @@ M.setup = function(opts)
 end
 
 M.has_definition = function()
+  --- FIXME: Compare definition use TS to determine if definition/vs declaration
+  --- and use clangd to find location of definition
   local client = vim.lsp.get_clients({ bufnr = 0, name = "clangd" })[1]
   if vim.tbl_isempty(client) then
     vim.notify("Clangd is not running", vim.log.levels.ERROR)
@@ -238,50 +283,32 @@ M.has_definition = function()
   end, 0)
 end
 
----@param range flipp.Range
----@param callback fun(symbols: flipp.Symbol[])
-M.get_fully_qualified_selected_symbols = function(range, callback)
-  local clients = vim.lsp.get_clients({ bufnr = 0, name = "clangd" })
-  if vim.tbl_isempty(clients) then
-    vim.notify("clangd is not running", vim.log.levels.ERROR)
-    return
+
+M.get_fully_qualified_selected_symbols_ts = function()
+  local cursor_range = get_cursor_range()
+  local decl_nodes = get_declaration_nodes()
+
+  ---@type flipp.Definition[]
+  local defs = {}
+  for _, decl_node in ipairs(decl_nodes) do
+    local node_range = get_node_range(decl_node)
+    if is_range_intersect(cursor_range, node_range) then
+      local def = build_definition_from_declaration(decl_node)
+      if def then
+        table.insert(defs, def)
+      end
+    end
   end
 
-  ---@type vim.lsp.Client
-  local clangd = clients[1]
-
-  local params = { textDocument = vim.lsp.util.make_text_document_params(0) }
-  clangd:request("textDocument/documentSymbol", params, function(err, result)
-    if err then
-      vim.notify("LSP error: " .. err.message, vim.log.levels.ERROR)
-      return
-    end
-
-    print(vim.inspect(result))
-    local selected_symbols = find_symbols_in_range(range, result)
-
-    callback(selected_symbols)
-  end, 0)
+  if #defs > 0 then
+    vim.fn.setreg("d",
+      vim.tbl_map(function(def) return def_to_string(def) end, defs),
+      "l"
+    )
+    vim.notify("Copied " .. #defs .. " definition to 'd' register", vim.log.levels.INFO)
+  end
 end
 
-
-M.get_definition_symbols = function()
-  local cursor_range = get_cursor_range()
-  M.get_fully_qualified_selected_symbols(cursor_range, function(selected_symbols)
-    -- FIXME: Includes definitions of those already implemented
-    local defs = build_symbols_fully_qualified_definitions(selected_symbols)
-    if vim.tbl_isempty(defs) then
-      vim.notify("No declaration hovered", vim.log.levels.INFO)
-      return
-    end
-
-    local def_strings = vim.tbl_map(def_to_string, defs)
-    -- HACK: Preferably, would paste the strings into the source file
-    vim.fn.setreg('d', def_strings, "l")
-    vim.notify("Copied " .. #def_strings .. " definitions to 'd' register", vim.log.levels.INFO)
-  end)
-end
-
-vim.keymap.set({ "n", "v" }, "<leader>gd", M.get_definition_symbols, { desc = "Generate Definitions" })
+vim.keymap.set({ "n", "v" }, "<leader>gd", M.get_fully_qualified_selected_symbols_ts, { desc = "Generate Definitions" })
 
 return M
