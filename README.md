@@ -1,4 +1,4 @@
-**flipp.nvim** provides function and method definition generatators for cpp
+**flipp.nvim** provides function and method definition generatators for C++
 
 [Features](#✨-features ) • [Requirements](#📋-requirements) • [Installation](#🔧-installation)
 
@@ -12,7 +12,7 @@
 # 📋 Requirements 
 
 * Neovim >= **v0.5.0**
-    * Treesitter cpp parser
+    * Treesitter C++ parser
 * clangd >= **v9.0.0**
 
 # 🔧 Installation
