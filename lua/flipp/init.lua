@@ -89,6 +89,29 @@ local function is_range_intersect(r1, r2)
   return true
 end
 
+
+---@param source integer|string
+---@return (vim.treesitter.LanguageTree)?
+local function get_parser(source)
+  local ts = vim.treesitter
+  local source_type = type(source)
+  if source_type == "number" then
+    return ts.get_parser(source, nil, { error = false })
+  elseif source_type == "string" then
+    return ts.get_string_parser(source, "cpp", { error = false })
+  end
+  error("Invalid {source} passed to |get_parser|")
+end
+
+---@param source integer|string
+---@return table<integer,TSTree>?
+local function get_ts_tree(source)
+  local parser = get_parser(source)
+  if parser == nil then error("Failed to create parser") end
+
+  return parser:parse()
+end
+
 ---@param decl_node TSNode
 ---@return TSNode|nil node TSNode of type function_declarator if not nil
 local function find_decl_func_node(decl_node)
@@ -110,15 +133,11 @@ local function is_callable_declaration(node)
   return find_decl_func_node(node) ~= nil
 end
 
----@return TSNode[]
-local function get_declaration_nodes()
-  local ts = vim.treesitter
-  local parser = ts.get_parser(0, nil, { error = false })
-  if not parser then
-    vim.notify("Failed to create treesitter parser", vim.log.levels.ERROR)
-    return {}
-  end
 
+---@param tree TSTree
+---@return TSNode[]
+local function get_declaration_nodes(tree)
+  local ts = vim.treesitter
   local query = ts.query.parse("cpp", [[
 (declaration
   declarator: [(function_declarator) (reference_declarator) (pointer_declarator)]
@@ -131,13 +150,7 @@ local function get_declaration_nodes()
 ]])
 
 
-  local tree = parser:parse()
-  if not tree then
-    vim.notify("Failed to parse tree", vim.log.levels.WARN)
-    return {}
-  end
-
-  local root = tree[1]:root()
+  local root = tree:root()
   local nodes = {}
   for _, node in query:iter_captures(root, 0) do
     if is_callable_declaration(node) then
@@ -186,44 +199,49 @@ local function build_definition_from_declaration(decl)
 end
 
 ---@param node TSNode
+---@param source string|integer
 ---@return string
-local function decl_func_node_to_str(node)
+local function decl_func_node_to_str(node, source)
   if node:type() ~= "function_declarator" then return "" end
 
   local ts = vim.treesitter
-  local outStr = ts.get_node_text(node, 0):gsub("%s+final", ""):gsub("%s+override", "")
+  local outStr = ts.get_node_text(node, source):gsub("%s+final", ""):gsub("%s+override", "")
   return outStr .. " {}"
 end
 
 ---@param nodes TSNode[]
+---@param source string|integer
 ---@return string
-local function namespace_nodes_to_str(nodes)
+local function namespace_nodes_to_str(nodes, source)
   if #nodes == 0 then return "" end
 
   local ts = vim.treesitter
-  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, 0) end, nodes)
+  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, source) end, nodes)
   return table.concat(strs, "::") .. "::"
 end
 
 ---@param nodes TSNode[]
+---@param source string|integer
 ---@return string
-local function class_nodes_to_str(nodes)
+local function class_nodes_to_str(nodes, source)
   if #nodes == 0 then return "" end
 
   local ts = vim.treesitter
-  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, 0) end, nodes)
+  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, source) end, nodes)
   return table.concat(strs, "::") .. "::"
 end
 
 ---@param nodes TSNode[]
+---@param source string|integer
 ---@return string
-local function classifier_nodes_to_str(nodes)
+local function classifier_nodes_to_str(nodes, source)
   local ts = vim.treesitter
-  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, 0) end, nodes)
+  local strs = vim.tbl_map(function(node) return ts.get_node_text(node, source) end, nodes)
   local s = ""
-  for _, w in ipairs(strs) do
-    if w == "virtual" or w == "static" then
-    elseif w == "*" or w == "&" then
+  for i, w in ipairs(strs) do
+    local node_type = nodes[i]:type()
+    if node_type == "virtual" or node_type == "storage_class_specifier" then
+    elseif node_type:find("^&+$") or node_type == "*" then
       s = s .. w
     else
       s = s .. w .. " "
@@ -233,12 +251,13 @@ local function classifier_nodes_to_str(nodes)
 end
 
 ---@param def flipp.Definition
+---@param source string|integer
 ---@return string
-local function def_to_string(def)
-  local func_str = decl_func_node_to_str(def.decl_func)
-  local namespace_str = namespace_nodes_to_str(def.namespaces)
-  local class_str = class_nodes_to_str(def.classes)
-  local classifier_str = classifier_nodes_to_str(def.classifiers)
+local function def_to_string(def, source)
+  local func_str = decl_func_node_to_str(def.decl_func, source)
+  local namespace_str = namespace_nodes_to_str(def.namespaces, source)
+  local class_str = class_nodes_to_str(def.classes, source)
+  local classifier_str = classifier_nodes_to_str(def.classifiers, source)
 
   return classifier_str .. namespace_str .. class_str .. func_str
 end
@@ -300,7 +319,9 @@ end
 
 function M.get_fully_qualified_undefined_selected_declarations()
   local cursor_range = get_cursor_range()
-  local decl_nodes = get_declaration_nodes()
+  local trees = get_ts_tree(0)
+  if trees == nil then return end
+  local decl_nodes = get_declaration_nodes(trees[1])
 
   ---@type flipp.Definition[]
   local defs = {}
@@ -317,11 +338,30 @@ function M.get_fully_qualified_undefined_selected_declarations()
 
   if #defs > 0 then
     vim.fn.setreg("d",
-      vim.tbl_map(function(def) return def_to_string(def) end, defs),
+      vim.tbl_map(function(def) return def_to_string(def, 0) end, defs),
       "l"
     )
     vim.notify("Copied " .. #defs .. " definition to 'd' register", vim.log.levels.INFO)
   end
+end
+
+---@param source string|integer
+---@return string[]
+function M._get_defs(source)
+  local trees = get_ts_tree(source)
+  if trees == nil then return {} end
+
+  ---@type string[]
+  local defs = {}
+  local decl_nodes = get_declaration_nodes(trees[1])
+  for _, decl_node in ipairs(decl_nodes) do
+    local def = build_definition_from_declaration(decl_node)
+    if def then
+      table.insert(defs, def_to_string(def, source))
+    end
+  end
+
+  return defs
 end
 
 return M
