@@ -21,7 +21,7 @@
 
 ```lua
 {
-    "williamtrojniak/flipp.nvim",
+    "willtrojniak/flipp.nvim",
     version = "*"
 }
 
