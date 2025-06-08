@@ -26,7 +26,7 @@ jobs:
           rg --version
 
           git clone --depth 1 https://github.com/nvim-lua/plenary.nvim ../plenary.nvim
-          git clone --depth 1 -b master https://github.com/nvim-lua/plenary.nvim ../nvim-treesitter
+          git clone --depth 1 -b master https://github.com/nvim-treesitter/nvim-treesitter ../nvim-treesitter
 
       - name: Run tests
         run: |
