@@ -74,7 +74,7 @@ local function get_node_range(node, source)
   ---@type flipp.Range
   return {
     ["start"] = { line = range_int[1], character = range_int[2] },
-    ["end"] = { line = range_int[4], character = range_int[5] }
+    ["end"] = { line = range_int[4], character = range_int[5] - 1 } -- transform to inclusiv, inclusive range
   }
 end
 
@@ -353,6 +353,13 @@ function M._get_callable_declaration_nodes(source)
   local trees = get_ts_tree(source)
   if trees == nil then return {} end
   return get_callable_declaration_nodes(trees[1])
+end
+
+---@param node TSNode
+---@param source string|integer
+---@return flipp.Range
+function M._get_node_range(node, source)
+  return get_node_range(node, source)
 end
 
 ---@param source string|integer
