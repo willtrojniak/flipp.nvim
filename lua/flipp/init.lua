@@ -78,16 +78,45 @@ local function get_node_range(node, source)
   }
 end
 
+---is position p1 before p2?
+---@param p1 flipp.Position
+---@param p2 flipp.Position
+---@return boolean
+local function is_pos_before(p1, p2)
+  if p1.line > p2.line then return false end
+  return p1.line < p2.line or p1.character < p2.character
+end
+
 ---@param r1 flipp.Range
 ---@param r2 flipp.Range
 ---@return boolean
 local function is_range_intersect(r1, r2)
   -- FIXME: Handle block intersections properly
-  if r1["end"].line < r2["start"].line then return false end
-  if r1["end"].line == r2["start"].line and r1["end"].character < r2["start"].character then return false end
-  if r1["start"].line > r2["end"].line then return false end
-  if r1["start"].line == r2["end"].line and r1["start"].character > r2["end"].character then return false end
-  return true
+  if not r1.block and not r2.block then
+    if r1["end"].line < r2["start"].line then return false end
+    if r1["end"].line == r2["start"].line and r1["end"].character < r2["start"].character then return false end
+    if r1["start"].line > r2["end"].line then return false end
+    if r1["start"].line == r2["end"].line and r1["start"].character > r2["end"].character then return false end
+    return true
+  end
+
+  if (r1.block and r2.block) or
+      (not r1.block and r1.start.line == r1["end"].line) or
+      (not r2.block and r2.start.line == r2["end"].line) then
+    return r1["start"].character <= r2["end"].character and
+        r1["end"].character >= r2["start"].character and
+        r1["start"].line <= r2["end"].line and
+        r1["end"].line >= r2["start"].line
+  end
+
+  if r2.block then
+    local l = r1
+    r1 = r2
+    r2 = l
+  end
+
+  -- r1 is block, r2 is line
+  return (not is_pos_before(r2["end"], r1["start"])) and (not is_pos_before(r1["end"], r2["start"]))
 end
 
 
@@ -360,6 +389,13 @@ end
 ---@return flipp.Range
 function M._get_node_range(node, source)
   return get_node_range(node, source)
+end
+
+---@param r1 flipp.Range
+---@param r2 flipp.Range
+---@return boolean
+function M._is_range_intersect(r1, r2)
+  return is_range_intersect(r1, r2)
 end
 
 ---@param source string|integer
