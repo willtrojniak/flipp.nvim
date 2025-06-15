@@ -1,4 +1,6 @@
 local get_defs = require('flipp')._get_defs
+
+---@diagnostic disable-next-line: undefined-field
 local eq = assert.are.same
 
 describe("treesitter cpp parser", function()
