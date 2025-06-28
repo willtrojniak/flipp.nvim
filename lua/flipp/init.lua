@@ -292,40 +292,20 @@ local function def_to_string(def, source)
   return classifier_str .. namespace_str .. class_str .. func_str
 end
 
-local M = {}
-
----@class flipp.Opts
-
----@type flipp.Opts
-local default_opts = {}
-
----@param opts flipp.Opts|nil: opts
-M.setup = function(opts)
-  opts = opts or default_opts
-
-  vim.api.nvim_create_user_command('FlippGenerate', function()
-      M.get_fully_qualified_undefined_selected_declarations()
-    end,
-    { nargs = 0, range = true })
-end
-
 ---@param node TSNode
+---@param lsp_client? vim.lsp.Client
 ---@return boolean
-local function has_definition(node)
-  local client = vim.lsp.get_clients({ bufnr = 0, name = "clangd" })[1]
-  if vim.tbl_isempty(client) then
-    vim.notify("Clangd is not running - cannot determine existing definitions", vim.log.levels.WARN)
-    return false
-  end
+local function has_definition(node, lsp_client)
+  if lsp_client == nil then return false end
 
   local node_range = get_node_range(node, 0)
-  local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+  local params = vim.lsp.util.make_position_params(0, lsp_client.offset_encoding)
   params.position = {
     line = node_range.start.line, character = node_range.start.character
   }
 
   --- PERF: Can this be made async again - or perhaps make outer funcs async
-  local resp = client:request_sync("textDocument/definition", params)
+  local resp = lsp_client:request_sync("textDocument/definition", params)
   if not resp then
     vim.notify("LSP timed out", vim.log.levels.WARN)
     return false
@@ -346,34 +326,87 @@ local function has_definition(node)
   return false
 end
 
+local M = {}
 
-function M.get_fully_qualified_undefined_selected_declarations()
-  local source = 0
-  local cursor_range = get_cursor_range()
+---@class flipp.Opts
+---@field register string
+---@field lsp_name string
+
+---@type flipp.Opts
+local default_opts = {
+  register = "f",
+  lsp_name = "clangd",
+
+}
+
+---@param opts flipp.Opts|nil: opts
+M.setup = function(opts)
+  opts = opts or default_opts
+  opts.register = opts.register or default_opts.register
+  opts.lsp_name = opts.lsp_name or default_opts.lsp_name
+
+  vim.api.nvim_create_user_command('FlippGenerate', function(args)
+      local source = 0
+
+      ---@type flipp.Range
+      local range
+      if (args.line1 == args.line2) then
+        range = get_cursor_range()
+      else
+        local start = vim.fn.getpos("'<")
+        local finish = vim.fn.getpos("'>")
+        range = {
+          ["start"] = { line = start[2] - 1, character = start[3] - 1 },
+          ["end"] = { line = finish[2] - 1, character = finish[3] - 1 },
+          block = vim.fn.visualmode() ~= 'v' and vim.fn.visualmode() ~= "V"
+        }
+      end
+
+      ---@type vim.lsp.Client|nil
+      local lsp_client = nil
+      local lsp_clients = vim.lsp.get_clients({ bufnr = 0, name = opts.lsp_name })
+      if vim.tbl_isempty(lsp_clients) then
+        vim.notify(opts.lsp_name .. " is not running - cannot determine existing definitions", vim.log.levels.WARN)
+      else
+        lsp_client = lsp_clients[1]
+      end
+
+      local only_undefined = true
+      local defs = M.get_fully_qualified_selected_declarations(source, range, only_undefined, lsp_client)
+
+      if #defs == 0 then return end
+
+      local reg = args.reg ~= '' and args.reg or opts.register
+      vim.fn.setreg(reg, defs, "l")
+      vim.notify("Copied " .. #defs .. " definition to '" .. reg .. "' register", vim.log.levels.INFO)
+    end,
+    { nargs = 0, range = true })
+end
+
+---@param source integer | string
+---@param range flipp.Range
+---@param only_undefined boolean Whether or not to only select undefined declarations
+---@param lsp_client? vim.lsp.Client Required when only_undefined is true
+---@return string[]
+function M.get_fully_qualified_selected_declarations(source, range, only_undefined, lsp_client)
   local trees = get_ts_tree(source)
-  if trees == nil then return end
+  if trees == nil then return {} end
   local decl_nodes = get_callable_declaration_nodes(trees[1])
 
-  ---@type flipp.Definition[]
+  ---@type string[]
   local defs = {}
   for _, decl_node in ipairs(decl_nodes) do
     local node_range = get_node_range(decl_node, source)
     local func_node = find_decl_func_node(decl_node)
-    if func_node and is_range_intersect(cursor_range, node_range) and not has_definition(func_node) then
+    if func_node and is_range_intersect(range, node_range) and not (only_undefined and has_definition(func_node, lsp_client)) then
       local def = build_definition_from_declaration(decl_node)
       if def then
-        table.insert(defs, def)
+        table.insert(defs, def_to_string(def, source))
       end
     end
   end
 
-  if #defs > 0 then
-    vim.fn.setreg("d",
-      vim.tbl_map(function(def) return def_to_string(def, 0) end, defs),
-      "l"
-    )
-    vim.notify("Copied " .. #defs .. " definition to 'd' register", vim.log.levels.INFO)
-  end
+  return defs
 end
 
 ---@param source string|integer
