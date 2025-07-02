@@ -282,10 +282,11 @@ end
 
 ---@param def flipp.Definition
 ---@param source string|integer
+---@param namespaces boolean
 ---@return string
-local function def_to_string(def, source)
+local function def_to_string(def, source, namespaces)
   local func_str = decl_func_node_to_str(def.decl_func, source)
-  local namespace_str = namespace_nodes_to_str(def.namespaces, source)
+  local namespace_str = namespaces and namespace_nodes_to_str(def.namespaces, source) or ""
   local class_str = class_nodes_to_str(def.classes, source)
   local classifier_str = classifier_nodes_to_str(def.classifiers, source)
 
@@ -326,16 +327,46 @@ local function has_definition(node, lsp_client)
   return false
 end
 
+---@param lsp_client vim.lsp.Client
+---@param bufnr integer
+---@param callback fun(err?: lsp.ResponseError, result?: string)
+local function with_source_file_uri(lsp_client, bufnr, callback)
+  if lsp_client.name ~= "clangd" then return nil, nil end
+
+  local method_name = 'textDocument/switchSourceHeader'
+  local params = vim.lsp.util.make_text_document_params(bufnr)
+  lsp_client:request(method_name, params, callback)
+end
+
+
 local M = {}
 
 ---@class flipp.Opts
 ---@field register string
 ---@field lsp_name string
+---@field win vim.api.keyset.win_config|fun(curr_win: integer): vim.api.keyset.win_config
+---@field peek boolean
+---@field namespaces boolean
 
 ---@type flipp.Opts
 local default_opts = {
   register = "f",
   lsp_name = "clangd",
+  peek = true,
+  namespaces = false,
+  win = function(curr_win)
+    local curr_height = vim.api.nvim_win_get_height(curr_win)
+    local curr_width = vim.api.nvim_win_get_width(curr_win)
+
+    ---@type vim.api.keyset.win_config
+    return {
+      relative = 'win',
+      row = math.ceil(curr_height / 4),
+      col = 0,
+      height = math.ceil(curr_height / 2),
+      width = curr_width,
+    }
+  end
 
 }
 
@@ -344,6 +375,9 @@ M.setup = function(opts)
   opts = opts or default_opts
   opts.register = opts.register or default_opts.register
   opts.lsp_name = opts.lsp_name or default_opts.lsp_name
+  opts.win = opts.win or default_opts.win
+  opts.peek = opts.peek or default_opts.peek
+  opts.namespaces = opts.namespaces or default_opts.namespaces
 
   vim.api.nvim_create_user_command('FlippGenerate', function(args)
       local source = 0
@@ -372,23 +406,62 @@ M.setup = function(opts)
       end
 
       local only_undefined = true
-      local defs = M.get_fully_qualified_selected_declarations(source, range, only_undefined, lsp_client)
+      local defs = M.get_fully_qualified_selected_declarations(source, range, opts.namespaces, only_undefined, lsp_client)
 
       if #defs == 0 then return end
 
       local reg = args.reg ~= '' and args.reg or opts.register
       vim.fn.setreg(reg, defs, "l")
       vim.notify("Copied " .. #defs .. " definition to '" .. reg .. "' register", vim.log.levels.INFO)
+
+      if (not opts.peek) or lsp_client == nil or lsp_client.name ~= "clangd" then return end
+
+      with_source_file_uri(lsp_client, source, function(error, result)
+        if error then
+          vim.notify("Error while trying to determine source/header file", vim.log.levels.ERROR)
+          return
+        end
+
+        if not result then
+          vim.notify("No corresponding source/header file", vim.log.levels.INFO)
+          return
+        end
+
+        local buf = vim.api.nvim_create_buf(false, true)
+
+        local curr_win = vim.api.nvim_get_current_win()
+
+        ---@type vim.api.keyset.win_config
+        local config
+        if type(opts.win) == "table" then
+          config = opts.win --[[@as vim.api.keyset.win_config]]
+        else
+          config = opts.win(curr_win)
+        end
+
+        local win = vim.api.nvim_open_win(buf, true, config)
+        vim.cmd.edit(vim.uri_to_fname(result))
+
+        vim.api.nvim_create_autocmd("WinLeave", {
+          callback = function()
+            if vim.api.nvim_win_is_valid(win) then
+              vim.api.nvim_win_close(win, true)
+            end
+          end,
+          once = true
+        })
+      end)
     end,
     { nargs = 0, range = true })
 end
 
 ---@param source integer | string
 ---@param range flipp.Range
+---@param namespaces boolean Whether or not to include encapsulating namespaces
 ---@param only_undefined boolean Whether or not to only select undefined declarations
 ---@param lsp_client? vim.lsp.Client Required when only_undefined is true
 ---@return string[]
-function M.get_fully_qualified_selected_declarations(source, range, only_undefined, lsp_client)
+function M.get_fully_qualified_selected_declarations(source, range, namespaces, only_undefined, lsp_client)
   local trees = get_ts_tree(source)
   if trees == nil then return {} end
   local decl_nodes = get_callable_declaration_nodes(trees[1])
@@ -401,7 +474,7 @@ function M.get_fully_qualified_selected_declarations(source, range, only_undefin
     if func_node and is_range_intersect(range, node_range) and not (only_undefined and has_definition(func_node, lsp_client)) then
       local def = build_definition_from_declaration(decl_node)
       if def then
-        table.insert(defs, def_to_string(def, source))
+        table.insert(defs, def_to_string(def, source, namespaces))
       end
     end
   end
@@ -432,8 +505,9 @@ function M._is_range_intersect(r1, r2)
 end
 
 ---@param source string|integer
+---@param namespaces boolean
 ---@return string[]
-function M._get_defs(source)
+function M._get_defs(source, namespaces)
   local trees = get_ts_tree(source)
   if trees == nil then return {} end
 
@@ -443,7 +517,7 @@ function M._get_defs(source)
   for _, decl_node in ipairs(decl_nodes) do
     local def = build_definition_from_declaration(decl_node)
     if def then
-      table.insert(defs, def_to_string(def, source))
+      table.insert(defs, def_to_string(def, source, namespaces))
     end
   end
 
