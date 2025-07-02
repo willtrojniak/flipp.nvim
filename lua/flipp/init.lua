@@ -326,16 +326,42 @@ local function has_definition(node, lsp_client)
   return false
 end
 
+---@param lsp_client vim.lsp.Client
+---@param bufnr integer
+---@param callback fun(err?: lsp.ResponseError, result?: string)
+local function with_source_file_uri(lsp_client, bufnr, callback)
+  if lsp_client.name ~= "clangd" then return nil, nil end
+
+  local method_name = 'textDocument/switchSourceHeader'
+  local params = vim.lsp.util.make_text_document_params(bufnr)
+  lsp_client:request(method_name, params, callback)
+end
+
+
 local M = {}
 
 ---@class flipp.Opts
 ---@field register string
 ---@field lsp_name string
+---@field win vim.api.keyset.win_config|fun(curr_win: integer): vim.api.keyset.win_config
 
 ---@type flipp.Opts
 local default_opts = {
   register = "f",
   lsp_name = "clangd",
+  win = function(curr_win)
+    local curr_height = vim.api.nvim_win_get_height(curr_win)
+    local curr_width = vim.api.nvim_win_get_width(curr_win)
+
+    ---@type vim.api.keyset.win_config
+    return {
+      relative = 'win',
+      row = math.ceil(curr_height / 4),
+      col = 0,
+      height = math.ceil(curr_height / 2),
+      width = curr_width,
+    }
+  end
 
 }
 
@@ -344,6 +370,7 @@ M.setup = function(opts)
   opts = opts or default_opts
   opts.register = opts.register or default_opts.register
   opts.lsp_name = opts.lsp_name or default_opts.lsp_name
+  opts.win = opts.win or default_opts.win
 
   vim.api.nvim_create_user_command('FlippGenerate', function(args)
       local source = 0
@@ -379,6 +406,44 @@ M.setup = function(opts)
       local reg = args.reg ~= '' and args.reg or opts.register
       vim.fn.setreg(reg, defs, "l")
       vim.notify("Copied " .. #defs .. " definition to '" .. reg .. "' register", vim.log.levels.INFO)
+
+      if lsp_client == nil or lsp_client.name ~= "clangd" then return end
+
+      with_source_file_uri(lsp_client, source, function(error, result)
+        if error then
+          vim.notify("Error while trying to determine source/header file", vim.log.levels.ERROR)
+          return
+        end
+
+        if not result then
+          vim.notify("No corresponding source/header file", vim.log.levels.INFO)
+          return
+        end
+
+        local buf = vim.api.nvim_create_buf(false, true)
+
+        local curr_win = vim.api.nvim_get_current_win()
+
+        ---@type vim.api.keyset.win_config
+        local config
+        if type(opts.win) == "table" then
+          config = opts.win --[[@as vim.api.keyset.win_config]]
+        else
+          config = opts.win(curr_win)
+        end
+
+        local win = vim.api.nvim_open_win(buf, true, config)
+        vim.cmd.edit(vim.uri_to_fname(result))
+
+        vim.api.nvim_create_autocmd("WinLeave", {
+          callback = function(data)
+            if vim.api.nvim_win_is_valid(win) then
+              vim.api.nvim_win_close(win, true)
+            end
+          end,
+          once = true
+        })
+      end)
     end,
     { nargs = 0, range = true })
 end
