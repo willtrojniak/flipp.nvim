@@ -18,21 +18,16 @@ Type "5j"
 Type "vib"
 Sleep 2s
 
-Set TypingSpeed 500ms
-Space
-Type "gd"
+Type ":FlippGenerate"
+Enter
 
-Set TypingSpeed 200ms
-Sleep 2s
-
-Escape
-Type "jjjo"
+Type "%jjo"
 Escape
 Type "k"
 Sleep 1s
 
 Set TypingSpeed 1000ms
-Type `"dp`
+Type `"fp`
 
 Sleep 10s
 
