@@ -1,7 +1,6 @@
 -- TODO: Automatically paste definitions into the source file
 -- TODO: Automatically paste namespaces
 -- TODO: Automatically detect matching namespaces in source file
--- TODO: Automatically open source file in another window
 
 ---@class flipp.lsp.clangd.Symbol
 ---@field name string
@@ -91,7 +90,6 @@ end
 ---@param r2 flipp.Range
 ---@return boolean
 local function is_range_intersect(r1, r2)
-  -- FIXME: Handle block intersections properly
   if not r1.block and not r2.block then
     if r1["end"].line < r2["start"].line then return false end
     if r1["end"].line == r2["start"].line and r1["end"].character < r2["start"].character then return false end
@@ -342,17 +340,17 @@ end
 local M = {}
 
 ---@class flipp.Opts
----@field register string
----@field lsp_name string
----@field win vim.api.keyset.win_config|fun(curr_win: integer): vim.api.keyset.win_config
----@field peek boolean
----@field namespaces boolean
+---@field register? string
+---@field lsp_name? string
+---@field win? vim.api.keyset.win_config|fun(curr_win: integer): vim.api.keyset.win_config
+---@field peek? boolean
+---@field namespaces? boolean
 
 ---@type flipp.Opts
 local default_opts = {
   register = "f",
   lsp_name = "clangd",
-  peek = true,
+  peek = false,
   namespaces = false,
   win = function(curr_win)
     local curr_height = vim.api.nvim_win_get_height(curr_win)
@@ -410,7 +408,7 @@ M.setup = function(opts)
 
       if #defs == 0 then return end
 
-      local reg = args.reg ~= '' and args.reg or opts.register
+      local reg = args.reg ~= '' and args.reg or opts.register --[[@as string]]
       vim.fn.setreg(reg, defs, "l")
       vim.notify("Copied " .. #defs .. " definition to '" .. reg .. "' register", vim.log.levels.INFO)
 
